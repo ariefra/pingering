@@ -1,0 +1,9 @@
+[package]
+name = "pingering"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30.2"
+signal-hook = "0.3.18"
+socket2 = "0.6.5"
