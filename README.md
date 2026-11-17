@@ -18,8 +18,11 @@ cargo build --release
 ## Usage
 
 ```
-USAGE: pingering [--details] [--legend] [-n] [-1] [-4|-6] [--interval <ms>]
-                 [--interval-modes <mode>] [--trace <host>] <hosts...>
+USAGE: pingering [--details] [--legend] [--compact] [-n] [-1] [-4|-6]
+                 [--interval <ms>] [--interval-mode <mode>]
+                 [--interface <name>] [--bar-style <chars>]
+                 [--bar-colors <list>] [--color-style <spec>]
+                 [--trace <host>] <hosts...>
 ```
 
 Ping several hosts at once (argv order):
@@ -75,7 +78,12 @@ Hidden detail lines collapse: with details off each host is just two rows.
 | `-4` | IPv4 only (default: both families) |
 | `-6` | IPv6 only (default: both families) |
 | `--interval <ms>` | ping cadence in milliseconds (default 1000) |
-| `--interval-modes <mode>` | `burst` (default): all pings sent together after each interval; `sequence`: hosts take turns, one send per interval. Trace hops ping every interval. |
+| `--interval-mode <mode>` | `burst` (default): all pings sent together after each interval; `sequence`: hosts take turns, one send per interval; `random`: like sequence but in random order (also jitters trace hops' first send). Trace hops otherwise ping every interval. |
+| `--bar-colors <list>` | comma-separated colors for the ramp levels, low to high (2–16; overrides `--color-style bars` and the latency bands) |
+| `--interface <name>` | bind ping sockets and traceroute to this interface (its address becomes the source) |
+| `--bar-style <chars>` | bar height ramp, low to high, 2–16 characters (default `▁▂▃▄▅▆▇█`) |
+| `--color-style <spec>` | per-element colors: comma-separated `key=value` with keys `title`, `bars`, `details`, `legend`, `scale`, `hop`, `ip`, `name`, `errors`, `message`; values are color names (`red`, `green`, `blue`, `yellow`, `magenta`, `cyan`, `white`, `gray`, `dark-gray`, `orange`, `black`), `#rrggbb`, or `default`. `bars` replaces the latency bands with one color; `scale` colors the scale hints; `hop` colors the trace hop index; `errors` colors pause/fatal messages; `message` colors the trace failure footer. |
+| `--compact` | one line per host: `ip (name)`, the bar window (shrunk to fit), and the compact detail block (`Cur 45.50ms  Avg 45.12  Loss 35.4%`) side by side; respects `--details`/`d` |
 | `--trace <host>` | trace mode: exactly one target, no positional hosts |
 | `-h`, `--help` | print usage and exit 0 |
 
@@ -101,6 +109,11 @@ rebuilds wait again, retrying every 60 s until the network is back.
 
 | Key | Action |
 | --- | --- |
+| `t` | toggle traceroute mode for the first host (ping mode with hosts only) |
+| `1` | toggle one-address-per-family and re-resolve the hosts |
+| `h` | toggle the legend (key bindings in the header) |
+| `s` | toggle the scale hints |
+| `c` | toggle compact mode (one line per host) |
 | `d` | toggle the detail line |
 | `q`, `Ctrl+C` | quit (exit 0) |
 

@@ -12,7 +12,7 @@
 
 use std::io::{self, ErrorKind};
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -40,14 +40,26 @@ const ECHO_REPLY_V4: u8 = 0;
 const ECHO_REQUEST_V6: u8 = 128;
 const ECHO_REPLY_V6: u8 = 129;
 
+/// Source addresses to bind ping sockets to (`--interface`): the interface's
+/// IPv4 address, and its IPv6 address with the scope index for link-locals.
+#[derive(Debug, Clone, Copy)]
+pub struct IfBind {
+    pub v4: Option<Ipv4Addr>,
+    pub v6: Option<Ipv6Addr>,
+    pub index: u32,
+}
+
 /// Everything a worker needs beyond its socket: where to ping, its family,
-/// and the timing (cadence, start delay, restart pause).
+/// the timing (cadence, start delay, restart pause), and the interface
+/// binding for socket rebuilds.
+#[derive(Debug, Clone)]
 pub struct WorkerSpec {
     pub peer: IpAddr,
     pub is_v6: bool,
     pub interval: Duration,
     pub start_delay: Duration,
     pub restart_delay: Duration,
+    pub ifbind: Option<IfBind>,
 }
 
 /// Events a worker emits; `host` indexes the host/pinger id.
@@ -68,11 +80,50 @@ pub enum WorkerEvent {
     },
 }
 
-/// Create a connected ICMP datagram (ping) socket for `peer`, IPv4 or IPv6.
+/// Look up an interface by name and collect the addresses to bind to
+/// (`--interface`). Errors name the interface and list the available ones.
+pub fn lookup_interface(name: &str) -> Result<IfBind, String> {
+    let ifaces =
+        if_addrs::get_if_addrs().map_err(|e| format!("cannot list network interfaces: {e}"))?;
+    let mut names: Vec<&str> = Vec::new();
+    let mut bind: Option<IfBind> = None;
+    for iface in &ifaces {
+        if !names.contains(&iface.name.as_str()) {
+            names.push(&iface.name);
+        }
+        if iface.name != name {
+            continue;
+        }
+        let entry = bind.get_or_insert(IfBind {
+            v4: None,
+            v6: None,
+            // The crate reports the interface index as an option; a missing
+            // index only matters for v6 link-local scopes.
+            index: iface.index.unwrap_or(0),
+        });
+        match iface.ip() {
+            IpAddr::V4(v4) if entry.v4.is_none() => entry.v4 = Some(v4),
+            IpAddr::V6(v6) if entry.v6.is_none() => entry.v6 = Some(v6),
+            _ => {}
+        }
+    }
+    match bind {
+        Some(bind) => Ok(bind),
+        None => Err(format!(
+            "interface '{name}' not found (available: {})",
+            names.join(", ")
+        )),
+    }
+}
+
+/// Create a connected ICMP datagram (ping) socket for `peer`, IPv4 or IPv6,
+/// optionally bound to an interface (`--interface`): the interface's address
+/// becomes the source address, which selects the egress interface without
+/// needing SO_BINDTODEVICE privileges.
 ///
 /// Linux ping sockets require `net.ipv4.ping_group_range` to admit the uid;
 /// otherwise this fails with EPERM and the caller reports it.
-pub fn create_socket(peer: IpAddr) -> io::Result<Socket> {
+pub fn create_socket(peer: IpAddr, ifbind: Option<&IfBind>) -> io::Result<Socket> {
     let (domain, protocol, addr) = match peer {
         IpAddr::V4(v4) => (
             Domain::IPV4,
@@ -86,6 +137,24 @@ pub fn create_socket(peer: IpAddr) -> io::Result<Socket> {
         ),
     };
     let socket = Socket::new(domain, Type::DGRAM, Some(protocol))?;
+    if let Some(bind) = ifbind {
+        match peer {
+            IpAddr::V4(_) => {
+                let Some(v4) = bind.v4 else {
+                    return Err(io::Error::other("interface has no IPv4 address"));
+                };
+                socket.bind(&SockAddr::from(SocketAddr::from((v4, 0))))?;
+            }
+            IpAddr::V6(_) => {
+                let Some(v6) = bind.v6 else {
+                    return Err(io::Error::other("interface has no IPv6 address"));
+                };
+                socket.bind(&SockAddr::from(std::net::SocketAddrV6::new(
+                    v6, 0, 0, bind.index,
+                )))?;
+            }
+        }
+    }
     socket.set_read_timeout(Some(REPLY_WINDOW_MAX))?;
     socket.connect(&addr)?;
     Ok(socket)
@@ -281,7 +350,7 @@ fn rebuild_paused(
         if !wait_delay(stop, spec.restart_delay) {
             return None;
         }
-        match create_socket(spec.peer) {
+        match create_socket(spec.peer, spec.ifbind.as_ref()) {
             Ok(socket) => {
                 let _ = tx.send(WorkerEvent::Started { host });
                 return Some(socket);
@@ -420,12 +489,52 @@ mod tests {
     }
 
     #[test]
+    fn interface_binding_selects_source_and_errors_without_family() {
+        // loopback always exists and always answers; binding to its own
+        // address must still ping.
+        let bind = IfBind {
+            v4: Some(Ipv4Addr::LOCALHOST),
+            v6: None,
+            index: 1,
+        };
+        let socket = create_socket(Ipv4Addr::LOCALHOST.into(), Some(&bind)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut out = [0u8; PACKET_LEN];
+        build_echo(&mut out, 99, false);
+        socket.send(&out).unwrap();
+        let mut reply = [MaybeUninit::<u8>::uninit(); PACKET_LEN];
+        let n = socket.recv(&mut reply).unwrap();
+        // SAFETY: recv initialized the first n >= 8 bytes of `reply`.
+        let header: [u8; 8] = unsafe {
+            [
+                reply[0].assume_init(),
+                reply[1].assume_init(),
+                reply[2].assume_init(),
+                reply[3].assume_init(),
+                reply[4].assume_init(),
+                reply[5].assume_init(),
+                reply[6].assume_init(),
+                reply[7].assume_init(),
+            ]
+        };
+        assert!(
+            n >= 8 && header[0] == ECHO_REPLY_V4,
+            "a bound socket still pings"
+        );
+        // An interface binding without an IPv6 address cannot ping v6.
+        let err = create_socket("::1".parse().unwrap(), Some(&bind)).unwrap_err();
+        assert!(err.to_string().contains("no IPv6 address"));
+    }
+
+    #[test]
     fn worker_pauses_and_restarts_on_sustained_loss() {
         // TEST-NET-1 blackholes: connect and send succeed, no reply ever
         // comes — so losses accumulate past the limit and the worker must
         // pause, rebuild its socket, and resume, repeatedly.
         let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-        let socket = match create_socket(peer) {
+        let socket = match create_socket(peer, None) {
             Ok(socket) => socket,
             Err(e) => panic!("no route to the TEST-NET blackhole: {e}"),
         };
@@ -435,6 +544,7 @@ mod tests {
             interval: Duration::from_millis(20),
             start_delay: Duration::ZERO,
             restart_delay: Duration::from_millis(80),
+            ifbind: None,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();

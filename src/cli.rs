@@ -2,31 +2,52 @@
 //! unknown-flag handling. Every exit-code rule is unit-tested inline.
 
 pub const USAGE: &str = "\
-USAGE: pingering [--details] [--legend] [-n] [-1] [-4|-6] [--interval <ms>]
-                 [--interval-modes <mode>] [--trace <host>] <hosts...>
+USAGE: pingering [--details] [--legend] [--compact] [-n] [-1] [-4|-6]
+                 [--interval <ms>] [--interval-mode <mode>]
+                 [--interface <name>] [--bar-style <chars>]
+                 [--color-style <spec>] [--trace <host>] <hosts...>
 
   --details        show the detail line under each graph (hidden by
                    default; toggle with d)
   --legend         show the key bindings and each graph's scale (hidden
                    by default)
+  --compact        one line per host: ip/name, bars, and the detail line
+                   side by side (bars shrink to fit)
   -n               do not resolve names: trace hops show bare IPs
   -1               at most one address per family per name (default: all
                    addresses)
   -4               IPv4 only (default: both families)
   -6               IPv6 only (default: both families)
   --interval <ms>  ping cadence in milliseconds (default 1000)
-  --interval-modes <mode>
+  --interval-mode <mode>
                    how hosts share the cadence: burst sends all pings
                    together every interval (default); sequence sends one
-                   host per interval, rotating. Trace hops ping every
+                   host per interval, rotating; random sends one host per
+                   interval in random order (also randomizes trace hops'
+                   first-send phase). Trace hops otherwise ping every
                    interval
+  --interface <name>
+                   bind ping sockets and traceroute to this interface
+  --bar-style <chars>
+                   bar height ramp, low to high (2-16 characters;
+                   default ▁▂▃▄▅▆▇█)
+  --bar-colors <list>
+                   comma-separated colors for the ramp levels, low to high
+                   (2-16; overrides --color-style bars and the latency
+                   bands)
+  --color-style <spec>
+                   comma-separated key=value colors for title, bars,
+                   details, legend, scale, hop, ip, name, errors, message;
+                   values: red, green, blue, yellow, magenta, cyan, white,
+                   gray, dark-gray, orange, black, #rrggbb, or default
   --trace <host>   traceroute mode: one target, no positional hosts; every
                    hop with an address is live-pinged, and the trace
                    repeats after 60 s when nothing is found or traceroute
                    fails
   -h, --help       show this help and exit
 
-Keys: d toggle details, q / Ctrl+C quit.
+Keys: t traceroute (first host), 1 single-family, h legend, s scale,
+      c compact, d details, q / Ctrl+C quit.
 ";
 
 /// Ping cadence when --interval is not given.
@@ -40,6 +61,9 @@ pub enum IntervalMode {
     /// Hosts take turns; one send per interval, so each host's own cadence
     /// is host_count * interval.
     Sequence,
+    /// Like sequence, but the rotation order is randomized (also randomizes
+    /// the trace hops' first-send phase).
+    Random,
 }
 
 /// Address families selected on argv; the default is both.
@@ -56,14 +80,24 @@ pub struct Cli {
     pub details: bool,
     /// `--legend`: show the key bindings and each graph's scale.
     pub legend: bool,
+    /// `--compact`: one line per host (ip/name, bars, detail line).
+    pub compact: bool,
     /// `-n`: skip name resolution (trace hops show bare IPs).
     pub no_resolve: bool,
     /// `-1`: at most one address per family per name.
     pub single: bool,
     /// `--interval`: ping cadence in milliseconds.
     pub interval_ms: u64,
-    /// `--interval-modes`: how hosts share the cadence.
+    /// `--interval-mode`: how hosts share the cadence.
     pub interval_mode: IntervalMode,
+    /// `--interface`: bind sockets and traceroute to this interface.
+    pub interface: Option<String>,
+    /// `--bar-style`: custom bar height ramp, low to high.
+    pub bar_style: Option<String>,
+    /// `--bar-colors`: colors for the ramp levels, low to high.
+    pub bar_colors: Option<String>,
+    /// `--color-style`: raw per-element color spec, parsed by the app.
+    pub color_style: Option<String>,
     pub family: Family,
     pub mode: CliMode,
 }
@@ -88,12 +122,17 @@ pub enum Parsed {
 pub fn parse(args: &[String]) -> Parsed {
     let mut details = false;
     let mut legend = false;
+    let mut compact = false;
     let mut no_resolve = false;
     let mut single = false;
     let mut v4 = false;
     let mut v6 = false;
     let mut interval_ms: Option<u64> = None;
     let mut interval_mode: Option<IntervalMode> = None;
+    let mut interface: Option<String> = None;
+    let mut bar_style: Option<String> = None;
+    let mut bar_colors: Option<String> = None;
+    let mut color_style: Option<String> = None;
     let mut trace: Option<String> = None;
     let mut hosts: Vec<String> = Vec::new();
     let mut flags_done = false;
@@ -122,6 +161,73 @@ pub fn parse(args: &[String]) -> Parsed {
                     return Parsed::Error("duplicate --legend".into());
                 }
                 legend = true;
+            }
+            "--compact" => {
+                if compact {
+                    return Parsed::Error("duplicate --compact".into());
+                }
+                compact = true;
+            }
+            "--interface" => {
+                if interface.is_some() {
+                    return Parsed::Error("duplicate --interface".into());
+                }
+                let Some(value) = args.get(i) else {
+                    return Parsed::Error("--interface requires a value".into());
+                };
+                i += 1;
+                if value.starts_with('-') || value.is_empty() {
+                    return Parsed::Error(format!(
+                        "--interface value must be an interface name: '{value}'"
+                    ));
+                }
+                interface = Some(value.clone());
+            }
+            "--bar-style" => {
+                if bar_style.is_some() {
+                    return Parsed::Error("duplicate --bar-style".into());
+                }
+                let Some(value) = args.get(i) else {
+                    return Parsed::Error("--bar-style requires a value".into());
+                };
+                i += 1;
+                let chars = value.chars().count();
+                if value.starts_with('-') || !(2..=16).contains(&chars) {
+                    return Parsed::Error(format!(
+                        "--bar-style needs 2-16 ramp characters, low to high: '{value}'"
+                    ));
+                }
+                bar_style = Some(value.clone());
+            }
+            "--bar-colors" => {
+                if bar_colors.is_some() {
+                    return Parsed::Error("duplicate --bar-colors".into());
+                }
+                let Some(value) = args.get(i) else {
+                    return Parsed::Error("--bar-colors requires a value".into());
+                };
+                i += 1;
+                if value.starts_with('-') || value.trim().is_empty() {
+                    return Parsed::Error(format!(
+                        "--bar-colors value must be comma-separated colors: '{value}'"
+                    ));
+                }
+                bar_colors = Some(value.clone());
+            }
+            "--color-style" => {
+                if color_style.is_some() {
+                    return Parsed::Error("duplicate --color-style".into());
+                }
+                let Some(value) = args.get(i) else {
+                    return Parsed::Error("--color-style requires a value".into());
+                };
+                i += 1;
+                if value.starts_with('-') || value.trim().is_empty() {
+                    return Parsed::Error(format!(
+                        "--color-style value must be key=value pairs: '{value}'"
+                    ));
+                }
+                color_style = Some(value.clone());
             }
             "-1" => {
                 if single {
@@ -166,25 +272,26 @@ pub fn parse(args: &[String]) -> Parsed {
                     Err(_) => return Parsed::Error(format!("invalid --interval value '{value}'")),
                 }
             }
-            "--interval-modes" => {
+            "--interval-mode" => {
                 if interval_mode.is_some() {
-                    return Parsed::Error("duplicate --interval-modes".into());
+                    return Parsed::Error("duplicate --interval-mode".into());
                 }
                 let Some(value) = args.get(i) else {
-                    return Parsed::Error("--interval-modes requires a value".into());
+                    return Parsed::Error("--interval-mode requires a value".into());
                 };
                 i += 1;
                 if value.starts_with('-') {
                     return Parsed::Error(format!(
-                        "--interval-modes value must not start with '-': '{value}'"
+                        "--interval-mode value must not start with '-': '{value}'"
                     ));
                 }
                 match value.as_str() {
                     "burst" => interval_mode = Some(IntervalMode::Burst),
                     "sequence" => interval_mode = Some(IntervalMode::Sequence),
+                    "random" => interval_mode = Some(IntervalMode::Random),
                     _ => {
                         return Parsed::Error(format!(
-                            "invalid --interval-modes mode '{value}' (burst or sequence)"
+                            "invalid --interval-mode mode '{value}' (burst, sequence or random)"
                         ));
                     }
                 }
@@ -232,10 +339,15 @@ pub fn parse(args: &[String]) -> Parsed {
         Some(target) => Parsed::Run(Cli {
             details,
             legend,
+            compact,
             no_resolve,
             single,
             interval_ms,
             interval_mode,
+            interface,
+            bar_style,
+            bar_colors,
+            color_style,
             family,
             mode: CliMode::Trace { target },
         }),
@@ -245,10 +357,15 @@ pub fn parse(args: &[String]) -> Parsed {
         None => Parsed::Run(Cli {
             details,
             legend,
+            compact,
             no_resolve,
             single,
             interval_ms,
             interval_mode,
+            interface,
+            bar_style,
+            bar_colors,
+            color_style,
             family,
             mode: CliMode::Ping { hosts },
         }),
@@ -280,10 +397,15 @@ mod tests {
             Parsed::Run(Cli {
                 details,
                 legend: _,
+                compact: _,
                 no_resolve: _,
                 single: _,
                 interval_ms,
                 interval_mode,
+                interface: _,
+                bar_style: _,
+                bar_colors: _,
+                color_style: _,
                 family: _,
                 mode: CliMode::Ping { hosts },
             }) => {
@@ -317,8 +439,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_compact_interface_bar_style_color_style() {
+        match parse_strs(&[
+            "--compact",
+            "--interface",
+            "eth0",
+            "--bar-style",
+            ".:-=+*#@",
+            "--color-style",
+            "title=red,bars=cyan,details=green,legend=gray,ip=yellow,name=blue",
+            "h",
+        ]) {
+            Parsed::Run(Cli {
+                compact,
+                interface,
+                bar_style,
+                color_style,
+                ..
+            }) => {
+                assert!(compact);
+                assert_eq!(interface.as_deref(), Some("eth0"));
+                assert_eq!(bar_style.as_deref(), Some(".:-=+*#@"));
+                assert_eq!(
+                    color_style.as_deref(),
+                    Some("title=red,bars=cyan,details=green,legend=gray,ip=yellow,name=blue")
+                );
+            }
+            other => panic!("expected a ping run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_compact_interface_bar_style_color_style_are_usage_errors() {
+        assert!(matches!(
+            parse_strs(&["--compact", "--compact", "h"]),
+            Parsed::Error(_)
+        ));
+        assert!(matches!(parse_strs(&["--interface"]), Parsed::Error(_)));
+        assert!(matches!(
+            parse_strs(&["--interface", "eth0", "--interface", "eth1", "h"]),
+            Parsed::Error(_)
+        ));
+        assert!(matches!(
+            parse_strs(&["--bar-style", "a", "h"]),
+            Parsed::Error(_)
+        ));
+        assert!(matches!(
+            parse_strs(&["--bar-style", "abcdefghijklmnop", "h"]),
+            Parsed::Run(_)
+        ));
+        assert!(matches!(
+            parse_strs(&["--bar-style", "abcdefghijklmnopq", "h"]),
+            Parsed::Error(_)
+        ));
+        assert!(matches!(parse_strs(&["--color-style"]), Parsed::Error(_)));
+    }
+
+    #[test]
     fn parses_interval_flags() {
-        match parse_strs(&["--interval", "250", "--interval-modes", "sequence", "h"]) {
+        match parse_strs(&["--interval", "250", "--interval-mode", "sequence", "h"]) {
             Parsed::Run(Cli {
                 interval_ms,
                 interval_mode,
@@ -329,6 +508,10 @@ mod tests {
             }
             other => panic!("expected a ping run, got {other:?}"),
         }
+        assert!(matches!(
+            parse_strs(&["--interval-mode", "random", "h"]),
+            Parsed::Run(_)
+        ));
         assert!(matches!(
             parse_strs(&["--interval", "10", "h"]),
             Parsed::Run(_)
@@ -358,28 +541,34 @@ mod tests {
 
     #[test]
     fn bad_interval_modes_are_usage_errors() {
+        assert!(matches!(parse_strs(&["--interval-mode"]), Parsed::Error(_)));
         assert!(matches!(
-            parse_strs(&["--interval-modes"]),
+            parse_strs(&["--interval-mode", "both", "h"]),
             Parsed::Error(_)
         ));
         assert!(matches!(
-            parse_strs(&["--interval-modes", "both", "h"]),
+            parse_strs(&["--interval-mode", "-x", "h"]),
             Parsed::Error(_)
         ));
         assert!(matches!(
-            parse_strs(&["--interval-modes", "-x", "h"]),
+            parse_strs(&["--interval-mode", "burst", "--interval-mode", "burst", "h"]),
             Parsed::Error(_)
         ));
+    }
+
+    #[test]
+    fn parses_bar_colors() {
+        match parse_strs(&["--bar-colors", "green,yellow,#ff8800", "h"]) {
+            Parsed::Run(Cli { bar_colors, .. }) => {
+                assert_eq!(bar_colors.as_deref(), Some("green,yellow,#ff8800"));
+            }
+            other => panic!("expected a ping run, got {other:?}"),
+        }
         assert!(matches!(
-            parse_strs(&[
-                "--interval-modes",
-                "burst",
-                "--interval-modes",
-                "burst",
-                "h"
-            ]),
+            parse_strs(&["--bar-colors", "red", "--bar-colors", "red", "h"]),
             Parsed::Error(_)
         ));
+        assert!(matches!(parse_strs(&["--bar-colors"]), Parsed::Error(_)));
     }
 
     #[test]
@@ -491,10 +680,15 @@ mod tests {
             Parsed::Run(Cli {
                 details,
                 legend: _,
+                compact: _,
                 no_resolve: _,
                 single: _,
                 interval_ms: _,
                 interval_mode: _,
+                interface: _,
+                bar_style: _,
+                bar_colors: _,
+                color_style: _,
                 family: _,
                 mode: CliMode::Ping { hosts },
             }) => {
@@ -515,10 +709,15 @@ mod tests {
             Parsed::Run(Cli {
                 details,
                 legend: _,
+                compact: _,
                 no_resolve: _,
                 single: _,
                 interval_ms: _,
                 interval_mode: _,
+                interface: _,
+                bar_style: _,
+                bar_colors: _,
+                color_style: _,
                 family: _,
                 mode: CliMode::Trace { target },
             }) => {

@@ -56,6 +56,7 @@ pub struct TraceRunner {
     target: String,
     v6: bool,
     no_resolve: bool,
+    interface: Option<String>,
     /// Some while the child runs; killed and reaped on drop.
     child: Option<Child>,
     events: Receiver<TraceEvent>,
@@ -70,10 +71,15 @@ impl TraceRunner {
     /// Spawn traceroute for one address family. The pre-flight has already
     /// verified the binary exists in PATH; spawn failures after that are
     /// terminal errors.
-    pub fn spawn(target: &str, v6: bool, no_resolve: bool) -> std::io::Result<TraceRunner> {
+    pub fn spawn(
+        target: &str,
+        v6: bool,
+        no_resolve: bool,
+        interface: Option<&str>,
+    ) -> std::io::Result<TraceRunner> {
         let (tx, rx) = channel();
         let ip_hops = Arc::new(AtomicUsize::new(0));
-        let mut child = Self::spawn_child(target, v6, no_resolve)?;
+        let mut child = Self::spawn_child(target, v6, no_resolve, interface)?;
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
         Self::start_readers(&tx, stdout, stderr, Arc::clone(&ip_hops))?;
@@ -81,6 +87,7 @@ impl TraceRunner {
             target: target.to_string(),
             v6,
             no_resolve,
+            interface: interface.map(str::to_string),
             child: Some(child),
             events: rx,
             tx,
@@ -89,12 +96,20 @@ impl TraceRunner {
         })
     }
 
-    fn spawn_child(target: &str, v6: bool, no_resolve: bool) -> std::io::Result<Child> {
+    fn spawn_child(
+        target: &str,
+        v6: bool,
+        no_resolve: bool,
+        interface: Option<&str>,
+    ) -> std::io::Result<Child> {
         let mut cmd = Command::new("traceroute");
         cmd.args(["-q", "1", "-w", "2", "-m", "30"]);
         cmd.arg(if v6 { "-6" } else { "-4" });
         if no_resolve {
             cmd.arg("-n");
+        }
+        if let Some(iface) = interface {
+            cmd.args(["-i", iface]);
         }
         cmd.arg(target)
             .env("LC_ALL", "C")
@@ -172,7 +187,12 @@ impl TraceRunner {
             self.retry_at = None;
             self.ip_hops.store(0, Ordering::Relaxed);
             let _ = self.tx.send(TraceEvent::Reset);
-            match Self::spawn_child(&self.target, self.v6, self.no_resolve) {
+            match Self::spawn_child(
+                &self.target,
+                self.v6,
+                self.no_resolve,
+                self.interface.as_deref(),
+            ) {
                 Ok(mut child) => {
                     let stdout = child.stdout.take().expect("stdout was piped");
                     let stderr = child.stderr.take().expect("stderr was piped");

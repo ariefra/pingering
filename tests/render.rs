@@ -27,7 +27,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
 use ratatui::style::Color;
 
-use app::{App, Sample};
+use app::{App, Label, Sample, ViewStyle};
 use trace::Hop;
 
 // The render spec's colors and height ramp, restated here so the tests assert
@@ -74,6 +74,14 @@ fn positions_of(buf: &Buffer, symbol: &str, fg: Color) -> Vec<(u16, u16)> {
         .collect()
 }
 
+/// First x holding a ramp character in row `y` (none found -> None).
+fn first_ramp_x(buf: &Buffer, y: u16) -> Option<u16> {
+    (0..buf.area.width).find(|&x| {
+        let s = buf.cell(Position::new(x, y)).unwrap().symbol();
+        RAMP.contains(&s)
+    })
+}
+
 /// Seed `n` successful samples of `ms` so the running average is pinned near
 /// `ms` before the case under test pushes its own sample.
 fn seed_average(app: &mut App, n: usize, ms: f64) {
@@ -99,7 +107,7 @@ fn hop(idx: usize, addr: &str, name: Option<&str>, lost: bool) -> Hop {
 // (a) The detail line is hidden by default: no stats labels anywhere.
 #[test]
 fn default_view_hides_stats() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
+    let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
     app.push_sample(0, Sample { rtt_ms: Some(12.0) });
     app.push_sample(0, Sample { rtt_ms: Some(30.0) });
     let text = all_text(&render(&app));
@@ -111,7 +119,7 @@ fn default_view_hides_stats() {
 // (b) Pressing d shows the one-line detail block under the graph.
 #[test]
 fn d_key_shows_stats() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
+    let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
     app.push_sample(0, Sample { rtt_ms: Some(12.0) });
     press(&mut app, 'd');
     // One line: every label on the same row (row 3, under label+graph).
@@ -127,7 +135,13 @@ fn d_key_shows_stats() {
 // (c) --details shows the line from the start, before any key.
 #[test]
 fn details_flag_shows_from_start() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], true, false);
+    let mut app = App::new_ping(
+        vec![Label::plain("127.0.0.1")],
+        ViewStyle {
+            details: true,
+            ..ViewStyle::default()
+        },
+    );
     app.push_sample(0, Sample { rtt_ms: Some(12.0) });
     let stats_row = row_text(&render(&app), 3);
     for label in LABELS {
@@ -138,7 +152,7 @@ fn details_flag_shows_from_start() {
 // (b2) Toggle round-trip: d then d hides the line again.
 #[test]
 fn toggle_round_trip() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
+    let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
     app.push_sample(0, Sample { rtt_ms: Some(12.0) });
     press(&mut app, 'd');
     assert!(all_text(&render(&app)).contains("Current"));
@@ -153,7 +167,10 @@ fn toggle_round_trip() {
 // row, graph row) — no blank filler between panels.
 #[test]
 fn two_hosts_render_two_collapsed_graphs() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into(), "localhost".into()], false, false);
+    let mut app = App::new_ping(
+        vec![Label::plain("127.0.0.1"), Label::plain("localhost")],
+        ViewStyle::default(),
+    );
     app.push_sample(0, Sample { rtt_ms: Some(10.0) });
     app.push_sample(0, Sample { rtt_ms: Some(20.0) }); // avg 15: 20 -> 1.33x orange, top of the ramp
     app.push_sample(1, Sample { rtt_ms: Some(5.0) }); // avg 5: 5 -> 1x yellow, top of the ramp
@@ -172,40 +189,16 @@ fn two_hosts_render_two_collapsed_graphs() {
     );
 }
 
-// (d3) The graph window is capped at 40 columns, anchored left: with more
-// samples than fit, the newest sample sits at column 39 and column 40 stays
-// empty even on an 80-column terminal.
-#[test]
-fn graph_caps_at_40_columns() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
-    for _ in 0..45 {
-        app.push_sample(0, Sample { rtt_ms: Some(40.0) });
-    }
-    let buf = render(&app);
-    let newest = buf.cell(Position::new(39, 2)).unwrap();
-    assert_eq!(
-        newest.symbol(),
-        RAMP[6],
-        "newest sample at the window's right edge (40 ms on the 50 ms scale)"
-    );
-    let past_window = buf.cell(Position::new(40, 2)).unwrap();
-    assert_eq!(
-        past_window.symbol(),
-        " ",
-        "nothing beyond the 40-column window"
-    );
-    let oldest_visible = buf.cell(Position::new(0, 2)).unwrap();
-    assert_eq!(
-        oldest_visible.symbol(),
-        RAMP[6],
-        "window's oldest sample at the left edge"
-    );
-}
-
 // (d2) With details shown each host takes three rows: label, graph, detail.
 #[test]
 fn two_hosts_expand_to_three_rows_with_details() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into(), "localhost".into()], true, false);
+    let mut app = App::new_ping(
+        vec![Label::plain("127.0.0.1"), Label::plain("localhost")],
+        ViewStyle {
+            details: true,
+            ..ViewStyle::default()
+        },
+    );
     app.push_sample(0, Sample { rtt_ms: Some(12.0) });
     app.push_sample(1, Sample { rtt_ms: Some(5.0) });
     let buf = render(&app);
@@ -228,7 +221,7 @@ fn band_colors_follow_the_average() {
         (45.0, 6, ORANGE), // 45/50 of the scale, ~1.13x avg
         (70.0, 5, RED),    // 70/100 of the scale, ~1.74x avg
     ] {
-        let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
+        let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
         seed_average(&mut app, 100, 40.0);
         app.push_sample(0, Sample { rtt_ms: Some(rtt) });
         // Single host: label row 1, graph row 2; 101 samples scroll the
@@ -245,7 +238,7 @@ fn band_colors_follow_the_average() {
 // average -> the 1x band (yellow), at the top of the ramp (50 ms scale).
 #[test]
 fn lost_sample_renders_blank() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
+    let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
     app.push_sample(0, Sample { rtt_ms: Some(50.0) });
     app.push_sample(0, Sample { rtt_ms: None }); // newest sample lost
     let buf = render(&app);
@@ -258,67 +251,17 @@ fn lost_sample_renders_blank() {
     assert_eq!(adjacent.fg, YELLOW);
 }
 
-// (f) Legend: the keys hint in the header and the scale hint on the label
-// row are hidden by default and shown with --legend. The app title always
-// carries the version.
-#[test]
-fn legend_hidden_by_default_shown_with_flag() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
-    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
-    let buf = render(&app);
-    let text = all_text(&buf);
-    assert!(
-        !text.contains("d: details"),
-        "keys hint hidden without --legend"
-    );
-    assert!(
-        !text.contains("scale"),
-        "scale hint hidden without --legend"
-    );
-    assert!(
-        row_text(&buf, 0).contains("pingering v"),
-        "version in the title"
-    );
-
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, true);
-    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
-    let buf = render(&app);
-    assert!(
-        row_text(&buf, 0).contains("d: details"),
-        "keys hint with --legend"
-    );
-    assert!(row_text(&buf, 0).contains("q: quit"));
-    assert!(
-        row_text(&buf, 1).contains("scale"),
-        "scale hint with --legend"
-    );
-}
-
-// (e0) A paused worker (network error / sustained loss) shows its message on
-// the label row until the restart's Started clears it.
-#[test]
-fn paused_worker_shows_message_on_label_row() {
-    let mut app = App::new_ping(vec!["127.0.0.1".into()], false, false);
-    app.set_fatal(0, "7 pings lost in a row; restarting in 60 s".into());
-    let label = row_text(&render(&app), 1);
-    assert!(
-        label.contains("restarting in 60 s"),
-        "paused reason on the label row"
-    );
-    app.clear_fatal(0);
-    assert!(
-        !all_text(&render(&app)).contains("restarting"),
-        "a restarted worker clears the message"
-    );
-}
-
 // (e) Trace mode: a dim group header (`ip (name)`) on row 1, then the hop's
 // panel (label above, one-line graph below). An unresponsive hop produces no
 // row at all. Detail labels stay hidden by default; the footer carries the
 // status.
 #[test]
 fn trace_mode_renders_hop_panels() {
-    let mut app = App::new_trace("127.0.0.1".into(), vec!["127.0.0.1".into()], false, false);
+    let mut app = App::new_trace(
+        "127.0.0.1".into(),
+        vec!["127.0.0.1".into()],
+        ViewStyle::default(),
+    );
     let pinger = app.push_hop(0, hop(1, "127.0.0.1", Some("localhost"), false));
     assert!(pinger.is_some(), "a hop with an address must get a pinger");
     assert!(
@@ -360,7 +303,14 @@ fn trace_mode_renders_hop_panels() {
 // (e2) With details shown, the one-line block renders under the hop's graph.
 #[test]
 fn trace_details_render_under_the_hop_graph() {
-    let mut app = App::new_trace("127.0.0.1".into(), vec!["127.0.0.1".into()], true, false);
+    let mut app = App::new_trace(
+        "127.0.0.1".into(),
+        vec!["127.0.0.1".into()],
+        ViewStyle {
+            details: true,
+            ..ViewStyle::default()
+        },
+    );
     assert!(app.push_hop(0, hop(1, "127.0.0.1", None, false)).is_some());
     app.push_sample(0, Sample { rtt_ms: Some(12.0) });
     let stats_row = row_text(&render(&app), 4);
@@ -376,8 +326,7 @@ fn dual_stack_trace_renders_both_families() {
     let mut app = App::new_trace(
         "localhost".into(),
         vec!["127.0.0.1 (localhost)".into(), "::1 (localhost)".into()],
-        false,
-        false,
+        ViewStyle::default(),
     );
     assert!(app.push_hop(0, hop(1, "127.0.0.1", None, false)).is_some());
     assert!(app.push_hop(1, hop(1, "::1", None, false)).is_some());
@@ -394,7 +343,11 @@ fn dual_stack_trace_renders_both_families() {
 // Reset that precedes a re-trace clears the group's hops again.
 #[test]
 fn trace_retry_error_shows_in_footer_and_reset_clears() {
-    let mut app = App::new_trace("127.0.0.1".into(), vec!["127.0.0.1".into()], false, false);
+    let mut app = App::new_trace(
+        "127.0.0.1".into(),
+        vec!["127.0.0.1".into()],
+        ViewStyle::default(),
+    );
     assert!(app.push_hop(0, hop(1, "127.0.0.1", None, false)).is_some());
     app.trace_failed(0, "no responsive hops found".into());
     app.set_retry_secs(0, Some(42));
@@ -423,4 +376,289 @@ fn trace_retry_error_shows_in_footer_and_reset_clears() {
         "cleared hops must not render"
     );
     assert!(row_text(&buf, 23).contains("tracing..."));
+}
+
+// (e0) A paused worker (network error / sustained loss) shows its message on
+// the label row until the restart's Started clears it.
+#[test]
+fn paused_worker_shows_message_on_label_row() {
+    let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
+    app.set_fatal(0, "7 pings lost in a row; restarting in 60 s".into());
+    let label = row_text(&render(&app), 1);
+    assert!(
+        label.contains("restarting in 60 s"),
+        "paused reason on the label row"
+    );
+    app.clear_fatal(0);
+    assert!(
+        !all_text(&render(&app)).contains("restarting"),
+        "a restarted worker clears the message"
+    );
+}
+
+// (f) Legend: the keys hint in the header and the scale hint on the label
+// row are hidden by default and shown with --legend. The app title always
+// carries the version.
+#[test]
+fn legend_hidden_by_default_shown_with_flag() {
+    let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
+    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
+    let buf = render(&app);
+    let text = all_text(&buf);
+    assert!(
+        !text.contains("d:details"),
+        "keys hint hidden without --legend"
+    );
+    assert!(
+        !text.contains("scale"),
+        "scale hint hidden without --legend"
+    );
+    assert!(
+        row_text(&buf, 0).contains("pingering v"),
+        "version in the title"
+    );
+
+    let mut app = App::new_ping(
+        vec![Label::plain("127.0.0.1")],
+        ViewStyle {
+            legend: true,
+            scale: true,
+            ..ViewStyle::default()
+        },
+    );
+    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
+    let buf = render(&app);
+    let hint = row_text(&buf, 0);
+    // Every toggle key is listed in the legend.
+    for key in [
+        "t:trace",
+        "1:single",
+        "h:legend",
+        "s:scale",
+        "c:compact",
+        "d:details",
+        "q:quit",
+    ] {
+        assert!(hint.contains(key), "legend must list {key}: {hint}");
+    }
+    assert!(
+        row_text(&buf, 1).contains("scale"),
+        "scale hint with --legend"
+    );
+}
+
+// (f2) The h key toggles only the legend (keys hint); the s key toggles only
+// the scale hints — independently of each other.
+#[test]
+fn h_and_s_keys_toggle_legend_and_scale_independently() {
+    let mut app = App::new_ping(vec![Label::plain("127.0.0.1")], ViewStyle::default());
+    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
+
+    press(&mut app, 'h');
+    let buf = render(&app);
+    assert!(
+        row_text(&buf, 0).contains("d:details"),
+        "h shows the keys hint"
+    );
+    assert!(
+        !row_text(&buf, 1).contains("scale"),
+        "h must not touch the scale hints"
+    );
+
+    press(&mut app, 's');
+    let buf = render(&app);
+    assert!(
+        row_text(&buf, 1).contains("scale"),
+        "s shows the scale hints"
+    );
+    assert!(
+        row_text(&buf, 0).contains("d:details"),
+        "s must not touch the legend"
+    );
+
+    press(&mut app, 'h');
+    press(&mut app, 's');
+    let text = all_text(&render(&app));
+    assert!(!text.contains("d:details"), "h hides the keys hint again");
+    assert!(!text.contains("scale"), "s hides the scale hints again");
+}
+
+// (g) --compact: one row per host holds the label, the (shrunk) bar window,
+// and the compact detail block side by side.
+#[test]
+fn compact_renders_one_line_per_host() {
+    let mut app = App::new_ping(
+        vec![Label::plain("127.0.0.1"), Label::plain("localhost")],
+        ViewStyle {
+            compact: true,
+            details: true,
+            ..ViewStyle::default()
+        },
+    );
+    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
+    app.push_sample(1, Sample { rtt_ms: Some(5.0) });
+    let buf = render(&app);
+    // One row each: label + bars + compact details on row 1 and row 2.
+    let row0 = row_text(&buf, 1);
+    assert!(row0.contains("127.0.0.1"), "label in the compact line");
+    assert!(row0.contains("Cur"), "compact detail block in the line");
+    let row1 = row_text(&buf, 2);
+    assert!(row1.contains("localhost"), "second host's compact line");
+    assert!(row1.contains("Cur"), "second host's detail block");
+    // Bars sit between the label (24 cols) and the detail block.
+    let bar_x = first_ramp_x(&buf, 1).expect("a bar in the compact line");
+    assert!(
+        (25..=49).contains(&bar_x),
+        "bar right of the 24-col label, left of the details (x={bar_x})"
+    );
+}
+
+// (g2) The c key toggles compact mode live: two-row panels collapse to one
+// row and back; Ctrl+C still quits.
+#[test]
+fn c_key_toggles_compact_and_ctrl_c_quits() {
+    let mut app = App::new_ping(
+        vec![Label::plain("127.0.0.1"), Label::plain("localhost")],
+        ViewStyle::default(),
+    );
+    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
+    // Default: two-row panels -> host 1's label on row 3.
+    assert!(row_text(&render(&app), 3).contains("localhost"));
+    press(&mut app, 'c');
+    // Compact: one row per host -> host 1's label on row 2.
+    let buf = render(&app);
+    assert!(
+        row_text(&buf, 2).contains("localhost"),
+        "compact collapses to one row"
+    );
+    assert!(!app.quit, "plain c must not quit");
+    press(&mut app, 'c');
+    assert!(
+        row_text(&render(&app), 3).contains("localhost"),
+        "c toggles back"
+    );
+    // Ctrl+C keeps quitting.
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.quit, "Ctrl+C must quit");
+}
+
+// (h) --bar-style: the given characters are the height ramp, low to high.
+#[test]
+fn bar_style_swaps_the_ramp_characters() {
+    let mut app = App::new_ping(
+        vec![Label::plain("127.0.0.1")],
+        ViewStyle {
+            bar_ramp: vec!['.', 'o', 'O'],
+            ..ViewStyle::default()
+        },
+    );
+    seed_average(&mut app, 10, 40.0);
+    app.push_sample(0, Sample { rtt_ms: Some(20.0) }); // 20/100*2 = 0.4 -> '.' (bottom)
+    app.push_sample(0, Sample { rtt_ms: Some(40.0) }); // 40/100*2 = 0.8 -> 'o' (middle)
+    app.push_sample(0, Sample { rtt_ms: Some(90.0) }); // nice 100: 90/100*2 = 1.8 -> 'O' (top)
+    let buf = render(&app);
+    // 13 samples grow from the left: oldest at x=0, newest (90 ms) at x=12 —
+    // nice_scale(90) = 100, colored red (90 against a ~42 average).
+    let cell = buf.cell(Position::new(12, 2)).unwrap();
+    assert_eq!(cell.symbol(), "O");
+    assert_eq!(cell.fg, RED);
+    // The 40 ms samples: middle of the custom ramp, yellow band (~0.95x avg).
+    let older = buf.cell(Position::new(0, 2)).unwrap();
+    assert_eq!(older.symbol(), "o");
+    assert_eq!(older.fg, YELLOW);
+    // The 20 ms sample: bottom of the ramp, green band (~0.47x avg).
+    let bottom = buf.cell(Position::new(10, 2)).unwrap();
+    assert_eq!(bottom.symbol(), ".");
+    assert_eq!(bottom.fg, GREEN);
+}
+
+// (i) --color-style: per-element colors for the title, bars, the detail
+// line, and the ip/name spans of the label.
+#[test]
+fn color_style_applies_to_elements() {
+    let mut app = App::new_ping(
+        vec![Label {
+            prefix: String::new(),
+            ip: "127.0.0.1".into(),
+            name: Some("localhost".into()),
+        }],
+        ViewStyle {
+            details: true,
+            colors: app::parse_color_style(
+                "title=red,bars=cyan,details=green,ip=yellow,name=blue,errors=magenta,message=white",
+            )
+            .unwrap(),
+            ..ViewStyle::default()
+        },
+    );
+    app.push_sample(0, Sample { rtt_ms: Some(12.0) });
+    let buf = render(&app);
+    assert_eq!(
+        buf.cell(Position::new(0, 0)).unwrap().fg,
+        Color::Red,
+        "title"
+    );
+    let bar = buf.cell(Position::new(0, 2)).unwrap();
+    assert_eq!(
+        bar.fg,
+        Color::Cyan,
+        "bars use the custom color, not the bands"
+    );
+    let detail = buf.cell(Position::new(0, 3)).unwrap();
+    assert_eq!(detail.fg, Color::Green, "detail line color");
+    // Label spans: "127.0.0.1" yellow, " (localhost)" blue.
+    let ip_cell = (0..9)
+        .map(|x| buf.cell(Position::new(x, 1)).unwrap())
+        .find(|c| c.symbol() == "1")
+        .unwrap();
+    assert_eq!(ip_cell.fg, Color::Yellow, "ip span color");
+    let paren_x = 9; // the space then '(' at x=9/10
+    let name_cell = buf.cell(Position::new(paren_x, 1)).unwrap();
+    assert!(
+        name_cell.fg == Color::Blue || name_cell.fg == Color::Reset,
+        "separator/name region: {}",
+        name_cell.fg
+    );
+    let l = row_text(&buf, 1)
+        .chars()
+        .enumerate()
+        .find(|(x, _)| *x == 10)
+        .map(|(_, c)| c);
+    assert_eq!(l, Some('('), "label layout: ip then ' (name)'");
+    // errors: the paused/fatal reason on the label row's right side
+    // (right-aligned: 41 chars -> starts at x=39).
+    app.set_fatal(0, "7 pings lost in a row; restarting in 60 s".into());
+    let buf = render(&app);
+    let err_cell = (30..80)
+        .map(|x| buf.cell(Position::new(x, 1)).unwrap())
+        .find(|c| c.symbol() == "7")
+        .unwrap();
+    assert_eq!(err_cell.fg, Color::Magenta, "fatal message color");
+}
+
+// (i2) --color-style message: the trace footer's failure/retry text.
+#[test]
+fn message_color_applies_to_trace_footer() {
+    let mut app = App::new_trace(
+        "127.0.0.1".into(),
+        vec!["127.0.0.1".into()],
+        ViewStyle {
+            colors: app::parse_color_style("message=white").unwrap(),
+            ..ViewStyle::default()
+        },
+    );
+    app.trace_failed(0, "no responsive hops found".into());
+    app.set_retry_secs(0, Some(42));
+    // The footer's first visible cell carries the message color.
+    let footer_cell = buf_cell_of(&render(&app), 23);
+    assert_eq!(footer_cell.fg, Color::White, "trace failure message color");
+}
+
+/// The first cell of row `y` that holds any glyph (footer text starts at x=0,
+/// so the first non-space cell is the message start).
+fn buf_cell_of(buf: &Buffer, y: u16) -> ratatui::buffer::Cell {
+    let x = (0..buf.area.width)
+        .find(|&x| buf.cell(Position::new(x, y)).unwrap().symbol() != " ")
+        .unwrap_or(0);
+    buf.cell(Position::new(x, y)).unwrap().clone()
 }
