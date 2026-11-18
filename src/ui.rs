@@ -18,7 +18,7 @@ const DIM: Color = Color::DarkGray;
 /// The orange used for pause/failure reasons.
 const ORANGE: Color = Color::Rgb(255, 136, 0);
 const DASH: &str = "—";
-const HINT: &str = "t:trace 1:single h:legend s:scale c:compact d:details q:quit";
+const HINT: &str = "4:ipv4 6:ipv6 t:trace 1:single h:legend s:scale c:compact d:details q:quit";
 /// Graph window: the graph never exceeds this width, anchored left.
 const GRAPH_MAX_WIDTH: u16 = 40;
 /// Compact mode reserves this much for the one-line detail block.
@@ -76,25 +76,28 @@ pub fn render(f: &mut Frame, app: &App) {
 
 /// Header row 0: mode title left (colored by `title`); with the legend, the
 /// key hint right (colored by `legend`).
+/// Header rows: the title row, plus the legend row when the legend is on
+/// (the full key list no longer fits beside the title).
+fn header_rows(view: &ViewStyle) -> u16 {
+    if view.legend { 2 } else { 1 }
+}
+
 fn render_header(f: &mut Frame, title: &str, view: &ViewStyle) {
     let area = f.area();
-    let row = Rect::new(0, 0, area.width, 1);
     let title_style = view
         .colors
         .title
         .map(|c| Style::new().fg(c))
         .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(Line::styled(title, title_style)),
+        Rect::new(0, 0, area.width, 1),
+    );
     if view.legend {
-        let hint_w = (HINT.len() as u16).min(area.width);
-        let [left, right] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Length(hint_w)]).areas(row);
-        f.render_widget(Paragraph::new(Line::styled(title, title_style)), left);
         f.render_widget(
             Paragraph::new(Line::styled(HINT, legend_style(view))),
-            right,
+            Rect::new(0, 1, area.width, 1),
         );
-    } else {
-        f.render_widget(Paragraph::new(Line::styled(title, title_style)), row);
     }
 }
 
@@ -109,7 +112,7 @@ fn legend_style(view: &ViewStyle) -> Style {
 fn render_ping(f: &mut Frame, hosts: &[HostState], view: &ViewStyle) {
     let area = f.area();
     let needed = panel_rows(view);
-    let mut y = 1u16;
+    let mut y = header_rows(view);
     let mut overflow = 0;
     for host in hosts {
         if y + needed > area.height {
@@ -357,7 +360,7 @@ fn render_trace(f: &mut Frame, state: &TraceState, view: &ViewStyle) {
     }
     let footer_y = area.height - 1;
     let needed = panel_rows(view);
-    let mut y = 1u16;
+    let mut y = header_rows(view);
     let mut overflow = 0;
     for group in &state.groups {
         if y >= footer_y {

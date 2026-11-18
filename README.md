@@ -109,6 +109,8 @@ rebuilds wait again, retrying every 60 s until the network is back.
 
 | Key | Action |
 | --- | --- |
+| `4` | toggle the IPv4 family and re-resolve |
+| `6` | toggle the IPv6 family and re-resolve (the last enabled family can't be disabled) |
 | `t` | toggle traceroute mode for the first host (ping mode with hosts only) |
 | `1` | toggle one-address-per-family and re-resolve the hosts |
 | `h` | toggle the legend (key bindings in the header) |

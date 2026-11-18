@@ -46,7 +46,8 @@ USAGE: pingering [--details] [--legend] [--compact] [-n] [-1] [-4|-6]
                    fails
   -h, --help       show this help and exit
 
-Keys: t traceroute (first host), 1 single-family, h legend, s scale,
+Keys: 4 ipv4, 6 ipv6, t traceroute (first host), 1 single-family,
+      h legend, s scale,
       c compact, d details, q / Ctrl+C quit.
 ";
 
@@ -66,13 +67,9 @@ pub enum IntervalMode {
     Random,
 }
 
-/// Address families selected on argv; the default is both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Family {
-    V4,
-    V6,
-    Both,
-}
+// The Family enum lives in app (the App's family toggles are state) and is
+// re-exported here for the argv surface.
+pub use crate::app::Family;
 
 /// What the user asked for on the command line.
 #[derive(Debug, PartialEq, Eq)]

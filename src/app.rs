@@ -18,6 +18,15 @@ pub const SAMPLE_CAP: usize = 512;
 /// The default bar height ramp (`--bar-style` replaces it).
 pub const BLOCK_RAMP: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// The address families selected on argv and toggled with the 4/6 keys; the
+/// default is both. Lives here because the App's family toggles are state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    V4,
+    V6,
+    Both,
+}
+
 /// One ping outcome: `Some` RTT in ms for a reply, `None` for a timeout.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
@@ -260,6 +269,11 @@ pub struct App {
     pub resolve_requested: bool,
     /// One address per family (mirrors `-1`, toggled with the 1 key).
     pub single: bool,
+    /// IPv4 family enabled (mirrors `-4`/`-6`; toggled with the 4 and 6
+    /// keys, re-resolving like the 1 key).
+    pub family_v4: bool,
+    /// IPv6 family enabled.
+    pub family_v6: bool,
     pub view: ViewStyle,
     pub quit: bool,
     next_ping_id: usize,
@@ -284,6 +298,8 @@ impl App {
             trace_toggle_requested: false,
             resolve_requested: false,
             single: false,
+            family_v4: true,
+            family_v6: true,
             view,
             quit: false,
             next_ping_id: 0,
@@ -314,6 +330,8 @@ impl App {
             trace_toggle_requested: false,
             resolve_requested: false,
             single: false,
+            family_v4: true,
+            family_v6: true,
             view,
             quit: false,
             next_ping_id: 0,
@@ -355,7 +373,46 @@ impl App {
                 self.single = !self.single;
                 self.resolve_requested = true;
             }
+            // 4/6 toggle the IPv4/IPv6 families; disabling the last enabled
+            // family is ignored so the screen never goes empty.
+            (KeyCode::Char('4'), _) => {
+                if !(self.family_v4 && !self.family_v6) {
+                    self.family_v4 = !self.family_v4;
+                    self.resolve_requested = true;
+                }
+            }
+            (KeyCode::Char('6'), _) if !(self.family_v6 && !self.family_v4) => {
+                self.family_v6 = !self.family_v6;
+                self.resolve_requested = true;
+            }
             _ => {}
+        }
+    }
+
+    /// The address families currently enabled, from the 4/6 key state.
+    pub fn selected_family(&self) -> Family {
+        match (self.family_v4, self.family_v6) {
+            (true, false) => Family::V4,
+            (false, true) => Family::V6,
+            _ => Family::Both,
+        }
+    }
+
+    /// Seed the family toggles from the `-4`/`-6` selection.
+    pub fn set_family(&mut self, family: Family) {
+        match family {
+            Family::V4 => {
+                self.family_v4 = true;
+                self.family_v6 = false;
+            }
+            Family::V6 => {
+                self.family_v4 = false;
+                self.family_v6 = true;
+            }
+            Family::Both => {
+                self.family_v4 = true;
+                self.family_v6 = true;
+            }
         }
     }
 
@@ -708,6 +765,34 @@ mod tests {
         app.push_sample(added, Sample { rtt_ms: Some(5.0) });
         let added_host = app.ping.iter().find(|h| h.id == added).unwrap();
         assert_eq!(Stats::from_totals(&added_host.totals).received, 1);
+    }
+
+    #[test]
+    fn family_keys_toggle_families_with_a_last_family_guard() {
+        let mut app = App::new_ping(
+            vec![Label::plain("127.0.0.1"), Label::plain("localhost")],
+            ViewStyle::default(),
+        );
+        assert_eq!(app.selected_family(), Family::Both);
+        // 4 disables IPv4 (IPv6 stays): re-resolve requested.
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert_eq!(app.selected_family(), Family::V6);
+        assert!(app.resolve_requested);
+        app.resolve_requested = false; // the main loop consumes the request
+        // 6 would disable the last family: ignored, no re-resolve.
+        app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+        assert_eq!(app.selected_family(), Family::V6);
+        assert!(!app.resolve_requested);
+        // 4 re-enables IPv4: back to both.
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert_eq!(app.selected_family(), Family::Both);
+        // 6 alone disables IPv6.
+        app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+        assert_eq!(app.selected_family(), Family::V4);
+        // 6 re-enables it: re-resolve requested again.
+        app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+        assert_eq!(app.selected_family(), Family::Both);
+        assert!(app.resolve_requested);
     }
 
     #[test]

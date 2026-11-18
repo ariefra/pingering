@@ -48,7 +48,6 @@ const TICK: Duration = Duration::from_millis(50);
 struct PingCtx {
     interval_ms: u64,
     ifbind: Option<ping::IfBind>,
-    family: Family,
     mode: IntervalMode,
     interface: Option<String>,
     no_resolve: bool,
@@ -124,12 +123,11 @@ fn run() -> i32 {
     let mut ctx = PingCtx {
         interval_ms: cli.interval_ms,
         ifbind,
-        family: cli.family,
+        resolved: Vec::new(),
         mode: cli.interval_mode,
         interface: cli.interface.clone(),
         no_resolve: cli.no_resolve,
         hosts: Vec::new(),
-        resolved: Vec::new(),
         rng: AtomicU64::new(seed()),
     };
 
@@ -196,6 +194,7 @@ fn run() -> i32 {
         ),
         None => App::new_ping(ping_hosts.iter().map(|(l, _)| l.clone()).collect(), view),
     };
+    app.set_family(cli.family);
 
     // Panic hook BEFORE terminal init: restore raw mode / alternate screen,
     // then chain the default hook.
@@ -423,7 +422,7 @@ fn pump_once(
             app.stop_trace();
         } else if let Some(dest) = app.trace_destination().map(str::to_string) {
             // Trace the first host: one group per family it resolves to.
-            let addrs = resolve_all(&dest, ctx.family, app.single);
+            let addrs = resolve_all(&dest, app.selected_family(), app.single);
             let mut labels: Vec<String> = Vec::new();
             let mut groups: Vec<(String, bool)> = Vec::new();
             let (mut v4, mut v6) = (None, None);
@@ -695,7 +694,7 @@ fn re_resolve(
     let mut want: Vec<(Label, IpAddr)> = Vec::new();
     ctx.resolved.clear();
     for arg in &ctx.hosts {
-        let addrs = resolve_all(arg, ctx.family, app.single);
+        let addrs = resolve_all(arg, app.selected_family(), app.single);
         ctx.resolved.push((arg.clone(), addrs.clone()));
         for ip in addrs {
             want.push((host_label(arg, &ip), ip));
@@ -1023,7 +1022,6 @@ mod tests {
         let ctx = PingCtx {
             interval_ms: 1000,
             ifbind: None,
-            family: Family::Both,
             mode: IntervalMode::Random,
             interface: None,
             no_resolve: false,
