@@ -428,9 +428,11 @@ fn legend_hidden_by_default_shown_with_flag() {
     );
     app.push_sample(0, Sample { rtt_ms: Some(12.0) });
     let buf = render(&app);
-    let hint = row_text(&buf, 0);
-    // Every toggle key is listed in the legend.
+    let hint = row_text(&buf, 1);
+    // Every toggle key is listed in the legend (its own header row).
     for key in [
+        "4:ipv4",
+        "6:ipv6",
         "t:trace",
         "1:single",
         "h:legend",
@@ -442,7 +444,7 @@ fn legend_hidden_by_default_shown_with_flag() {
         assert!(hint.contains(key), "legend must list {key}: {hint}");
     }
     assert!(
-        row_text(&buf, 1).contains("scale"),
+        row_text(&buf, 2).contains("scale"),
         "scale hint with --legend"
     );
 }
@@ -457,22 +459,22 @@ fn h_and_s_keys_toggle_legend_and_scale_independently() {
     press(&mut app, 'h');
     let buf = render(&app);
     assert!(
-        row_text(&buf, 0).contains("d:details"),
+        row_text(&buf, 1).contains("d:details"),
         "h shows the keys hint"
     );
     assert!(
-        !row_text(&buf, 1).contains("scale"),
+        !row_text(&buf, 2).contains("scale"),
         "h must not touch the scale hints"
     );
 
     press(&mut app, 's');
     let buf = render(&app);
     assert!(
-        row_text(&buf, 1).contains("scale"),
+        row_text(&buf, 2).contains("scale"),
         "s shows the scale hints"
     );
     assert!(
-        row_text(&buf, 0).contains("d:details"),
+        row_text(&buf, 1).contains("d:details"),
         "s must not touch the legend"
     );
 
